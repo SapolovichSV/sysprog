@@ -11,19 +11,23 @@
 #include <errno.h>
 #include <string.h>
 
-#define handle_error() do {														\
-	printf("Error %s\n", strerror(errno));										\
-	exit(-1);																	\
-} while(0)
+#define handle_error()                         \
+	do                                         \
+	{                                          \
+		printf("Error %s\n", strerror(errno)); \
+		exit(-1);                              \
+	} while (0)
 
-enum coro_state {
+enum coro_state
+{
 	CORO_STATE_RUNNING,
 	CORO_STATE_SUSPENDED,
 	CORO_STATE_FINISHED,
 };
 
 /** Main coroutine structure, its context. */
-struct coro {
+struct coro
+{
 	/** Coroutine state. */
 	enum coro_state state;
 	/** A value, returned by func. */
@@ -44,7 +48,8 @@ struct coro {
 	struct rlist link;
 };
 
-struct coro_engine {
+struct coro_engine
+{
 	/**
 	 * Scheduler is the main coroutine - it represents the
 	 * context in which the scheduler itself runs.
@@ -91,7 +96,7 @@ coro_engine_resume_next(struct coro_engine *engine)
 {
 	assert(!rlist_empty(&engine->coros_running_now));
 	struct coro *to = rlist_shift_entry(&engine->coros_running_now,
-		struct coro, link);
+										struct coro, link);
 	struct coro *from = engine->this;
 	assert(from != NULL);
 
@@ -107,9 +112,10 @@ static void
 coro_engine_suspend(struct coro_engine *engine)
 {
 	struct coro *this = engine->this;
-	if (this == NULL) {
+	if (this == NULL)
+	{
 		printf("Error: deadlock - suspension with no active "
-			"coroutines\n");
+			   "coroutines\n");
 		exit(-1);
 	}
 	assert(rlist_empty(&this->link));
@@ -144,10 +150,11 @@ coro_engine_wakeup(struct coro_engine *engine, struct coro *coro)
 static void
 coro_engine_run(struct coro_engine *engine)
 {
-	while (true) {
+	while (true)
+	{
 		assert(rlist_empty(&engine->coros_running_now));
 		rlist_splice_tail(&engine->coros_running_now,
-			&engine->coros_running_next);
+						  &engine->coros_running_next);
 		if (rlist_empty(&engine->coros_running_now))
 			break;
 
@@ -160,7 +167,7 @@ coro_engine_run(struct coro_engine *engine)
 		 * loop.
 		 */
 		rlist_add_tail_entry(&engine->coros_running_now,
-			&engine->sched, link);
+							 &engine->sched, link);
 		coro_engine_resume_next(engine);
 		assert(rlist_empty(&engine->coros_running_now));
 		assert(engine->this == &engine->sched);
@@ -174,9 +181,10 @@ coro_engine_destroy(struct coro_engine *engine)
 	assert(engine->this == NULL);
 	assert(rlist_empty(&engine->coros_running_now));
 	assert(rlist_empty(&engine->coros_running_next));
-	while (!rlist_empty(&engine->coros_pool)) {
+	while (!rlist_empty(&engine->coros_pool))
+	{
 		struct coro *c = rlist_shift_entry(&engine->coros_pool,
-			struct coro, link);
+										   struct coro, link);
 		free(c->stack);
 		free(c);
 		assert(engine->coro_count > 0);
@@ -214,7 +222,8 @@ coro_body(int signum)
 	 * finally start work.
 	 */
 	my_engine->this = c;
-	while (true) {
+	while (true)
+	{
 		c->ret = c->func(c->func_arg);
 		c->func = NULL;
 		assert(c->state == CORO_STATE_RUNNING);
@@ -279,7 +288,8 @@ coro_engine_spawn_new(struct coro_engine *engine, coro_f func, void *func_arg)
 	struct coro *old_this = engine->this;
 	engine->this = c;
 	sigemptyset(&suss);
-	if (sigsetjmp(engine->start_point, 1) == 0) {
+	if (sigsetjmp(engine->start_point, 1) == 0)
+	{
 		raise(SIGUSR2);
 		while (engine->this != NULL)
 			sigsuspend(&suss);
@@ -299,7 +309,7 @@ coro_engine_spawn_new(struct coro_engine *engine, coro_f func, void *func_arg)
 	if (sigaltstack(&newst, NULL) != 0)
 		handle_error();
 	if ((oldst.ss_flags & SS_DISABLE) == 0 &&
-	    sigaltstack(&oldst, NULL) != 0)
+		sigaltstack(&oldst, NULL) != 0)
 		handle_error();
 	if (sigaction(SIGUSR2, &oldsa, NULL) != 0)
 		handle_error();
@@ -320,7 +330,7 @@ coro_engine_spawn(struct coro_engine *engine, coro_f func, void *func_arg)
 		return coro_engine_spawn_new(engine, func, func_arg);
 
 	struct coro *c = rlist_shift_entry(&engine->coros_pool,
-		struct coro, link);
+									   struct coro, link);
 	c->func = func;
 	c->func_arg = func_arg;
 	c->state = CORO_STATE_RUNNING;
@@ -335,7 +345,7 @@ coro_engine_join(struct coro_engine *engine, struct coro *coro)
 	assert(coro->joiner == NULL);
 	coro->joiner = engine->this;
 	while (coro->state == CORO_STATE_RUNNING ||
-		coro->state == CORO_STATE_SUSPENDED)
+		   coro->state == CORO_STATE_SUSPENDED)
 		coro_engine_suspend(engine);
 	assert(coro->state == CORO_STATE_FINISHED);
 	assert(coro->joiner == engine->this);
@@ -351,20 +361,17 @@ coro_engine_join(struct coro_engine *engine, struct coro *coro)
 
 static struct coro_engine glob_engine;
 
-void
-coro_sched_init(void)
+void coro_sched_init(void)
 {
 	coro_engine_create(&glob_engine);
 }
 
-void
-coro_sched_run(void)
+void coro_sched_run(void)
 {
 	coro_engine_run(&glob_engine);
 }
 
-void
-coro_sched_destroy(void)
+void coro_sched_destroy(void)
 {
 	coro_engine_destroy(&glob_engine);
 }
@@ -387,20 +394,17 @@ coro_join(struct coro *coro)
 	return coro_engine_join(&glob_engine, coro);
 }
 
-void
-coro_suspend(void)
+void coro_suspend(void)
 {
 	coro_engine_suspend(&glob_engine);
 }
 
-void
-coro_yield(void)
+void coro_yield(void)
 {
 	coro_engine_yield(&glob_engine);
 }
 
-void
-coro_wakeup(struct coro *coro)
+void coro_wakeup(struct coro *coro)
 {
 	coro_engine_wakeup(&glob_engine, coro);
 }
