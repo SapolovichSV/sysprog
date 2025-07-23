@@ -16,6 +16,7 @@ pkgs.mkShell {
     pkgs.bear
     pkgs.gnumake
     pkgs.cmake
+    pkgs.python314
   ];
 
   # Заголовочные файлы
