@@ -1,7 +1,7 @@
 #include "parser.h"
 #include "sys/types.h"
 
-#define DEBUG 0 // 1 - включить отладку, 0 - выключить
+#define DEBUG 1 // 1 - включить отладку, 0 - выключить
 
 #if DEBUG
 #define DBG_PRINT(fmt, ...)                                                    \
@@ -57,7 +57,17 @@ int execute_write(int pipe, char *filepath) {
     }
     return 0;
 }
+bool exec_exit(struct expr *exp, int *out_status_code) {
+    struct expr *cur = exp;
+    bool is_last = (cur->next == NULL);
 
+    if (is_last) {
+        *out_status_code = atoi(cur->cmd.args[0]);
+        DBG_PRINT("exec_exit with code %d", *out_status_code);
+        return true;
+    }
+    return false;
+}
 bool is_line_empty(const struct command_line *line) {
     if (line == NULL) {
         return true;
@@ -111,7 +121,8 @@ int execute_command(struct command cmd) {
     perror("error at execvp \n");
     return -1;
 }
-static void execute_command_line(const struct command_line *line) {
+static void execute_command_line(const struct command_line *line,
+                                 int *exit_code) {
     if (is_line_empty(line)) {
         DBG_PRINT("line is empty");
         exit(0);
@@ -127,7 +138,7 @@ static void execute_command_line(const struct command_line *line) {
     case OUTPUT_TYPE_STDOUT:
         break;
     case OUTPUT_TYPE_FILE_NEW: {
-        int flags = O_WRONLY | O_CREAT;
+        int flags = O_WRONLY | O_CREAT | O_TRUNC;
         output_fd = open(line->out_file, flags, 0644);
         break;
     }
@@ -137,7 +148,7 @@ static void execute_command_line(const struct command_line *line) {
         break;
     }
     }
-    int last_status = 0;
+    int *last_status = exit_code;
 
     while (exp != NULL) {
         switch (exp->type) {
@@ -146,6 +157,13 @@ static void execute_command_line(const struct command_line *line) {
                 exec_cd(exp->cmd);
                 exp = exp->next;
                 break;
+            }
+            if (strcmp(exp->cmd.exe, "exit") == 0) {
+                bool success_exit = exec_exit(exp, last_status);
+                exp = exp->next;
+                if (success_exit) {
+                    goto break_cycle;
+                }
             }
             bool is_last = (exp->next == NULL);
             int pipes[2];
@@ -159,6 +177,7 @@ static void execute_command_line(const struct command_line *line) {
 
             pid_t pid = fork();
             if (pid == 0) {
+
                 if (prev_pipe_read != -1) {
                     dup2(prev_pipe_read, STDIN_FILENO);
                     close(prev_pipe_read);
@@ -196,9 +215,9 @@ static void execute_command_line(const struct command_line *line) {
             break;
 
         case EXPR_TYPE_OR:
-            waitpid(last_pid, &last_status, 0);
+            waitpid(last_pid, last_status, 0);
 
-            if (WEXITSTATUS(last_status) == 0) {
+            if (WEXITSTATUS(*last_status) == 0) {
                 while (exp != NULL && exp->type == EXPR_TYPE_OR) {
                     exp = exp->next;
                     if (exp != NULL && exp->type == EXPR_TYPE_COMMAND) {
@@ -210,8 +229,8 @@ static void execute_command_line(const struct command_line *line) {
             }
             break;
         case EXPR_TYPE_AND: {
-            waitpid(last_pid, &last_status, 0);
-            if (WEXITSTATUS(last_status) != 0) {
+            waitpid(last_pid, last_status, 0);
+            if (WEXITSTATUS(*last_status) != 0) {
                 while (exp != NULL && exp->type == EXPR_TYPE_AND) {
                     exp = exp->next;
                     if (exp != NULL && exp->type == EXPR_TYPE_COMMAND) {
@@ -227,12 +246,26 @@ static void execute_command_line(const struct command_line *line) {
             DBG_PRINT("impossible default");
         }
     }
+break_cycle:
+    DBG_PRINT("label break_cycle last_status = %d", *last_status);
+    int pred_last;
+    while (wait(&pred_last) > 0) {
+        DBG_PRINT("WEXITSTATUS() = %d", WEXITSTATUS(pred_last));
+        if (WEXITSTATUS(pred_last) && (*last_status == 0)) {
+            *last_status = WEXITSTATUS(pred_last);
+        }
+    }
+    DBG_PRINT("label break_cycle last_status = %d", *last_status);
+    if (output_fd != -1) {
+        close(output_fd);
+    }
 }
 
 int main(void) {
     const size_t buf_size = 1024;
     char buf[buf_size];
     int rc;
+    int exit_code = 0;
     struct parser *p = parser_new();
     while ((rc = read(STDIN_FILENO, buf, buf_size)) > 0) {
         parser_feed(p, buf, rc);
@@ -245,10 +278,22 @@ int main(void) {
                 printf("Error: %d\n", (int)err);
                 continue;
             }
-            execute_command_line(line);
+            if (line->head && line->head->type == EXPR_TYPE_COMMAND) {
+                struct expr *next = line->head->next;
+                struct command *cmd = &line->head->cmd;
+                if (strcmp(cmd->exe, "exit") == 0 &&
+                    (!next || next->type != EXPR_TYPE_PIPE)) {
+                    exit_code = cmd->arg_count ? atoi(cmd->args[0]) : 0;
+                    DBG_PRINT("catch final exit with code: %d", exit_code);
+                    command_line_delete(line);
+                    goto cleanup;
+                }
+            }
+            execute_command_line(line, &exit_code);
             command_line_delete(line);
         }
     }
+cleanup:
     parser_delete(p);
-    return 0;
+    return exit_code;
 }
