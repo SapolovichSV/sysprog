@@ -1,7 +1,7 @@
 #include "parser.h"
 #include "sys/types.h"
 
-#define DEBUG 1 // 1 - включить отладку, 0 - выключить
+#define DEBUG 0 // 1 - включить отладку, 0 - выключить
 
 #if DEBUG
 #define DBG_PRINT(fmt, ...)                                                    \
@@ -29,34 +29,7 @@ void DEBUG__print_args(char **args) {
     }
     DBG_PRINT("\n");
 }
-int execute_write(int pipe, char *filepath) {
-    FILE *file = fopen(filepath, "w");
-    if (file == NULL) {
-        DBG_PRINT("can't open or read file");
-        return 1;
-    }
 
-    char buffer[1024];
-    ssize_t bytes_read;
-
-    while ((bytes_read = read(pipe, buffer, sizeof(buffer))) > 0) {
-        DBG_PRINT("buffer: %s", buffer);
-        ssize_t bytes_written = fwrite(buffer, 1, bytes_read, file);
-        if (bytes_read != bytes_written) {
-            DBG_PRINT("bytes_read != bytes_written");
-        }
-    }
-    if (bytes_read == -1) {
-        DBG_PRINT("read error");
-        fclose(file);
-        return -1;
-    }
-    if (fclose(file) != 0) {
-        DBG_PRINT("fclose error");
-        return -1;
-    }
-    return 0;
-}
 bool exec_exit(struct expr *exp, int *out_status_code) {
     struct expr *cur = exp;
     bool is_last = (cur->next == NULL);
@@ -115,7 +88,14 @@ char **build_args(const struct command cmd) {
     return args;
 }
 // must fork before use
-int execute_command(struct command cmd) {
+int execute_command(struct command cmd, int *last_status) {
+    DBG_PRINT("executing command %s", cmd.exe);
+    if (strcmp(cmd.exe, "echo") == 0) {
+        if (strcmp(cmd.args[0], "$?") == 0) {
+            printf("%d", *last_status);
+            return 0;
+        }
+    }
     char **args = build_args(cmd);
     execvp(args[0], args);
     perror("error at execvp \n");
@@ -133,17 +113,21 @@ static void execute_command_line(const struct command_line *line,
     int prev_pipe_read = -1;
     pid_t last_pid = -1;
     int output_fd = -1;
-
+    int flags = 0;
+    int saved_stdout = -1;
+    int exit_status = -1;
     switch (line->out_type) {
     case OUTPUT_TYPE_STDOUT:
         break;
     case OUTPUT_TYPE_FILE_NEW: {
-        int flags = O_WRONLY | O_CREAT | O_TRUNC;
+        saved_stdout = dup(STDOUT_FILENO);
+        flags = O_WRONLY | O_CREAT | O_TRUNC;
         output_fd = open(line->out_file, flags, 0644);
         break;
     }
     case OUTPUT_TYPE_FILE_APPEND: {
-        int flags = O_WRONLY | O_CREAT | O_APPEND;
+        saved_stdout = dup(STDOUT_FILENO);
+        flags = O_WRONLY | O_CREAT | O_APPEND;
         output_fd = open(line->out_file, flags, 0644);
         break;
     }
@@ -151,6 +135,9 @@ static void execute_command_line(const struct command_line *line,
     int *last_status = exit_code;
 
     while (exp != NULL) {
+
+        DBG_PRINT("in switch with exp type: %u", exp->type);
+
         switch (exp->type) {
         case EXPR_TYPE_COMMAND: {
             if (strcmp(exp->cmd.exe, "cd") == 0) {
@@ -159,9 +146,11 @@ static void execute_command_line(const struct command_line *line,
                 break;
             }
             if (strcmp(exp->cmd.exe, "exit") == 0) {
-                bool success_exit = exec_exit(exp, last_status);
+                bool success_exit = exec_exit(exp, &exit_status);
                 exp = exp->next;
+                DBG_PRINT("succes_exit = %d", success_exit);
                 if (success_exit) {
+                    *last_status = exit_status;
                     goto break_cycle;
                 }
             }
@@ -177,7 +166,6 @@ static void execute_command_line(const struct command_line *line,
 
             pid_t pid = fork();
             if (pid == 0) {
-
                 if (prev_pipe_read != -1) {
                     dup2(prev_pipe_read, STDIN_FILENO);
                     close(prev_pipe_read);
@@ -185,13 +173,15 @@ static void execute_command_line(const struct command_line *line,
                 if (is_last && output_fd != -1) {
                     dup2(output_fd, STDOUT_FILENO);
                     close(output_fd);
+                    output_fd = -1;
                 } else if (!is_last && exp->next->type == EXPR_TYPE_PIPE) {
                     close(pipes[0]);
                     dup2(pipes[1], STDOUT_FILENO);
                     close(pipes[1]);
                 }
 
-                execute_command(exp->cmd);
+                DBG_PRINT("forked cmd: %s", exp->cmd.exe);
+                execute_command(exp->cmd, last_status);
             }
 
             if (prev_pipe_read != -1) {
@@ -247,15 +237,19 @@ static void execute_command_line(const struct command_line *line,
         }
     }
 break_cycle:
-    DBG_PRINT("label break_cycle last_status = %d", *last_status);
-    int pred_last;
-    while (wait(&pred_last) > 0) {
-        DBG_PRINT("WEXITSTATUS() = %d", WEXITSTATUS(pred_last));
-        if (WEXITSTATUS(pred_last) && (*last_status == 0)) {
-            *last_status = WEXITSTATUS(pred_last);
-        }
+    if (saved_stdout != -1) {
+        dup2(saved_stdout, STDOUT_FILENO);
+        close(saved_stdout);
     }
-    DBG_PRINT("label break_cycle last_status = %d", *last_status);
+
+    if (last_pid > 0 && exit_status == -1) {
+        int status;
+        waitpid(last_pid, &status, 0);
+        *last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+    while (wait(NULL) > 0) {
+    }
+
     if (output_fd != -1) {
         close(output_fd);
     }
