@@ -1,7 +1,17 @@
 #include "userfs.h"
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#define DEBUG 1 // поменяй на 0 чтобы выключить
 
+#if DEBUG
+#define DBG(fmt, ...)                                                          \
+  printf("%s:%d - " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#else
+#define DBG(fmt, ...) // ничего не делаем
+#endif
 enum {
   BLOCK_SIZE = 512,
   MAX_FILE_SIZE = 1024 * 1024 * 100,
@@ -65,7 +75,8 @@ static int file_descriptor_capacity = 0;
 // about old fd's
 void alloc_file_descr_array(int with_capacity) {
 
-  file_descriptors = calloc(with_capacity, sizeof(struct filedesc *));
+  file_descriptors =
+      (struct filedesc **)calloc(with_capacity, sizeof(struct filedesc *));
   file_descriptor_capacity = with_capacity;
 }
 // new_capacity should be bigger than fd_count
@@ -99,48 +110,112 @@ int find_free_fd() {
 }
 enum ufs_error_code ufs_errno() { return ufs_error_code; }
 
-int ufs_open(const char *filename, int flags) {
-  if ((flags & UFS_CREATE) != 0) {
-    struct block new_block = {
-        malloc(BLOCK_SIZE),
-        0,
-        NULL,
-        NULL,
-    };
-    struct file new_file = {
-        &new_block, &new_block, 0, filename, NULL, NULL,
-    };
-    if (file_list == NULL) {
-      file_list = &new_file;
-    } else {
-      // need to iter on file_list and add file to list
-      for (struct file *curr = file_list->next; curr != NULL;
-           curr = curr->next) {
-        curr->next = &new_file;
-        new_file.prev = curr;
+// return fd or <0 if no fd for this file
+int get_file_fd_if_exists(const char *filename) {
+  if (file_descriptors == NULL) {
+    return -1;
+  }
+  for (int i = 0; i < file_descriptor_capacity; i++) {
+    if (file_descriptors[i] != NULL) {
+
+      struct file *file = file_descriptors[i]->file;
+      if (strcmp(file->name, filename) == 0) {
+        return i;
       }
     }
   }
-  if (file_list == NULL) {
+  return -1;
+}
+// also create new block
+struct file *create_new_file(const char *filename) {
+  struct block *new_block = calloc(1, sizeof(struct block));
+  new_block->memory = malloc(BLOCK_SIZE);
+
+  char *new_filename = malloc(strlen(filename) + 1);
+  strcpy(new_filename, filename);
+
+  struct file *new_file = malloc(sizeof(struct file));
+  new_file->block_list = new_block;
+  new_file->last_block = new_block;
+  new_file->refs = 0;
+  new_file->name = new_filename;
+  new_file->next = NULL;
+  new_file->prev = NULL;
+  return new_file;
+}
+// return's file with this name or NULL
+struct file *find_file_by_filename(const char* filename) {
+  struct file *file = NULL;
+  for (struct file *curr = file_list; curr != NULL; curr = curr->next) {
+    if (strcmp(curr->name, filename) == 0) {
+      file = curr;
+    }
+  }
+  return file;
+  
+}
+int ufs_open(const char *filename, int flags) {
+  DBG("start ufs_open ");
+  if ((flags & UFS_CREATE) != 0) {
+    // а что происходит если мы два раза подряд создаем файл
+    // с одним и тем же именем?
+    // я создаю новый файл с таким же именем
+    // это косяк
+    // возможное решение просто обнулять записанное в изначальном?
+    DBG("should create new file");
+    
+    struct file *new_file = create_new_file(filename);
+
+    if (file_list == NULL) {
+      DBG("file list is null, file_list=new_file");
+      file_list = new_file;
+    } else {
+      // check what if we already have file with such name
+
+      // podozritelno must check UNSAFE
+      // // need to iter on file_list and add file to list
+      // for (struct file *curr = file_list->next; curr != NULL;
+      //      curr = curr->next) {
+      //   curr->next = new_file;
+      //   new_file->prev = curr;
+      // }
+
+      struct file *curr = file_list;
+      for (; curr->next != NULL; curr = curr->next) {
+      }
+      curr->next = new_file;
+      new_file->prev = curr;
+
+      // END UNSAFE
+      DBG("added to file_list new file");
+    }
+  }
+  struct file *curr_file = NULL;
+  for (struct file *curr = file_list; curr != NULL; curr = curr->next) {
+    DBG("found filename:%s", curr->name);
+    if (strcmp(filename, curr->name) == 0) {
+      curr_file = curr;
+      break;
+    }
+  }
+  if (curr_file == NULL) {
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
-  struct file *curr_file = file_list;
-  while (curr_file->name != filename) {
-    if (curr_file->next != NULL) {
-      curr_file = curr_file->next;
-    } else {
-      if (file_list == NULL) {
-        ufs_error_code = UFS_ERR_NO_FILE;
-        return -1;
-      }
-    }
+  DBG("founded file");
+  if (get_file_fd_if_exists(filename) >= 0) {
+    curr_file->refs++;
+    return get_file_fd_if_exists(filename);
   }
+
   struct filedesc *fd = malloc(sizeof(struct filedesc));
   fd->file = curr_file;
   curr_file->refs++;
 
-  int id = find_free_fd();
+  int new_fd = find_free_fd();
+  file_descriptors[new_fd] = fd;
+  file_descriptor_count++;
+  return new_fd;
 
   /* IMPLEMENT THIS FUNCTION */
   (void)filename;
@@ -172,6 +247,20 @@ ssize_t ufs_read(int fd, char *buf, size_t size) {
 }
 
 int ufs_close(int fd) {
+  if (file_descriptors[fd] == NULL) {
+    DBG("trying to close unexisted fd %d", fd);
+    ufs_error_code = UFS_ERR_NO_FILE;
+    return -1;
+  }
+  struct filedesc *fd_struct = file_descriptors[fd];
+  struct file *file = fd_struct->file;
+  if (--(file->refs) == 0) {
+    // no more fd should destroy fd and fd_arr[fd] = NULL;
+    free(fd_struct);
+    file_descriptors[fd] = NULL;
+    file_descriptor_count--;
+  }
+  return 0;
   /* IMPLEMENT THIS FUNCTION */
   (void)fd;
   ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
