@@ -68,6 +68,8 @@ void DBG_PRINT_ALL_FILENAMES() {
 struct filedesc {
   struct file *file;
 
+  int *ptr_offset;
+
   /* PUT HERE OTHER MEMBERS */
 };
 
@@ -161,6 +163,8 @@ struct file *find_file_by_filename(const char *filename) {
   for (struct file *curr = file_list; curr != NULL; curr = curr->next) {
     if (strcmp(curr->name, filename) == 0) {
       file = curr;
+      DBG("find file with needed name(just check for cycle error)");
+      // when test's will pass add here return (useless iterations)
     }
   }
   return file;
@@ -185,6 +189,9 @@ void reset_blocklist(struct block *head) {
   head->prev = NULL;
 }
 void delete_file(struct file *file) {
+  if (file_list == file) {
+    file_list = file->next;
+  }
   reset_blocklist(file->block_list);
   free_block(file->block_list);
   free(file->name);
@@ -196,6 +203,7 @@ void create_and_add_to_filelist_new_file(const char *filename) {
   // check now exists file with such filename or no
   struct file *new_file = find_file_by_filename(filename);
   if (new_file == NULL) {
+    DBG("\t file with such name not exists,creating a new one");
 
     new_file = alloc_new_file(filename);
     if (file_list == NULL) {
@@ -243,6 +251,8 @@ int ufs_open(const char *filename, int flags) {
 
   struct filedesc *fd = malloc(sizeof(struct filedesc));
   fd->file = curr_file;
+  fd->ptr_offset = malloc(sizeof(int));
+  fd->ptr_offset = 0;
   curr_file->refs++;
 
   int new_fd = find_free_fd();
@@ -302,31 +312,42 @@ ssize_t ufs_write(int fd, const char *buf, size_t size) {
   ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
   return -1;
 }
-size_t read_file(struct file *to_read, char *buf, size_t size) {
+ssize_t read_file(struct file *to_read, int *ptr_offset, char *buf,
+                  size_t size) {
 
   size_t remain = size;
   struct block *curr_block = to_read->block_list;
-  int total_readed = 0;
-  while (remain != 0) {
-    size_t available_in_block = curr_block->occupied;
-    size_t howmuch_read =
-        (remain < available_in_block) ? remain : available_in_block;
-    memcpy(buf,);
-    
-    remain -= howmuch_write;
-    total_written += howmuch_write;
-    curr_block->occupied += howmuch_write;
-
-    // get_next_block_if_havent alloc new;
-    if (curr_block->next == NULL) {
-      // curr_block->next = alloc_new_block
-      curr_block->next = alloc_new_block();
-      curr_block = curr_block->next;
+  int block_offset = 0;
+  int moving_offset = *ptr_offset;
+  // we should go to place where ptr stopped;
+  while (moving_offset != 0) {
+    if (moving_offset < BLOCK_SIZE) {
+      block_offset = moving_offset;
+      moving_offset = 0;
     } else {
       curr_block = curr_block->next;
+      moving_offset -= BLOCK_SIZE;
     }
   }
-  return total_written;
+  int total_readed = 0;
+  while (remain != 0) {
+    if (curr_block == NULL) {
+      return 0;
+    }
+    size_t available_read = curr_block->occupied - block_offset;
+    if (available_read == 0) {
+      curr_block = curr_block->next;
+      block_offset = 0;
+      continue;
+    }
+    size_t to_read = (remain < available_read) ? remain : available_read;
+    memcpy(buf + total_readed, curr_block->memory + block_offset, to_read);
+    block_offset = 0;
+    total_readed += to_read;
+    remain -= to_read;
+  }
+  *ptr_offset += total_readed;
+  return total_readed;
 }
 ssize_t ufs_read(int fd, char *buf, size_t size) {
 
@@ -338,7 +359,8 @@ ssize_t ufs_read(int fd, char *buf, size_t size) {
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
-  struct file *to_read = file_descriptors[fd];
+  struct file *to_read = file_descriptors[fd]->file;
+  return read_file(to_read, file_descriptors[fd]->ptr_offset, buf, size);
 
   /* IMPLEMENT THIS FUNCTION */
   (void)fd;
