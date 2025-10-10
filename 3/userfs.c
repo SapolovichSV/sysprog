@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define DEBUG 1 // поменяй на 0 чтобы выключить
+#define DEBUG 0 // поменяй на 0 чтобы выключить
 
 #if DEBUG
 #define DBG(fmt, ...)                                                          \
@@ -53,7 +53,6 @@ struct file {
 
   /* PUT HERE OTHER MEMBERS */
   bool delete;
-  int file_size;
 };
 
 /** List of all files. */
@@ -111,7 +110,7 @@ int find_free_fd() {
     if (file_descriptors[i] == NULL) {
       return i;
     } else {
-      DBG("fd[%d] file with filename%s", i, file_descriptors[i]->file->name);
+      // DBG("fd[%d] file with filename%s", i, file_descriptors[i]->file->name);
     }
   }
   int old_capacity = file_descriptor_capacity;
@@ -205,7 +204,7 @@ void DBG_read_file_content(struct file *to_read) {
   for (struct block *curr = to_read->block_list;
        curr != NULL && curr->occupied != 0; curr = curr->next) {
     for (int i = 0; i < curr->occupied; i++) {
-      DBG("%c", curr->memory[i]);
+      // DBG("%c", curr->memory[i]);
     }
   }
   DBG("content of file printed\n");
@@ -252,9 +251,13 @@ int ufs_open(const char *filename, int flags) {
   }
   struct file *curr_file = NULL;
   for (struct file *curr = file_list; curr != NULL; curr = curr->next) {
-    DBG("found filename:%s", curr->name);
+    // DBG("found filename:%s", curr->name);
     if (strcmp(filename, curr->name) == 0) {
       curr_file = curr;
+      DBG("curr file = %s", filename);
+      if (curr == file_list) {
+        DBG("curr file is a head");
+      }
       break;
     }
   }
@@ -311,6 +314,10 @@ struct block *get_needed_block(struct block *head_block, int offset) {
 ssize_t write_to_file(struct file *to_write, int *ptr_offset, const char *buf,
                       size_t size) {
   DBG("start writing info in file");
+  if (*ptr_offset + size > MAX_FILE_SIZE) {
+    ufs_error_code = UFS_ERR_NO_MEM;
+    return -1;
+  }
   size_t remain = size;
   // add ptr offset use
   struct block *curr_block =
@@ -478,18 +485,20 @@ int ufs_delete(const char *filename) {
   // handle this file delete in ufs_close();
   // first delete from file_list;
 
+  if (to_delete == file_list) {
+    file_list = file_list->next;
+    return 0;
+  }
   struct file *prev_file = to_delete->prev;
   struct file *next_file = to_delete->next;
   if (prev_file != NULL) {
     prev_file->next = next_file;
-    DBG("wtf we have prev but that file is head of file_list????");
-    assert(to_delete == file_list);
   }
-  // WARN maybe this file head of file list
   if (next_file != NULL) {
     next_file->prev = prev_file;
   }
-  assert(file_list == to_delete);
+
+  assert(file_list != to_delete);
   return 0;
   /* IMPLEMENT THIS FUNCTION */
   (void)filename;
