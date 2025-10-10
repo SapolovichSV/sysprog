@@ -69,8 +69,7 @@ void DBG_PRINT_ALL_FILENAMES() {
 struct filedesc {
   struct file *file;
 
-  int *write_offset;
-  int *read_offset;
+  int *offset;
   /* PUT HERE OTHER MEMBERS */
 };
 
@@ -95,9 +94,10 @@ void alloc_file_descr_array(int with_capacity) {
 // new_capacity should be bigger than fd_count
 // you must be sure what fd array already allocated
 void resize_file_descr_array(int new_capacity) {
+  DBG("resize filedescr_arr");
   struct filedesc **old_fds = file_descriptors;
   alloc_file_descr_array(new_capacity);
-  for (int i = 0; i < new_capacity; i++) {
+  for (int i = 0; i < file_descriptor_capacity; i++) {
     file_descriptors[i] = old_fds[i];
   }
   file_descriptor_capacity = new_capacity;
@@ -110,6 +110,8 @@ int find_free_fd() {
   for (int i = 0; i < file_descriptor_capacity; i++) {
     if (file_descriptors[i] == NULL) {
       return i;
+    } else {
+      DBG("fd[%d] file with filename%s", i, file_descriptors[i]->file->name);
     }
   }
   int old_capacity = file_descriptor_capacity;
@@ -198,6 +200,16 @@ void delete_file(struct file *file) {
   free(file->name);
   free(file);
 }
+void DBG_read_file_content(struct file *to_read) {
+  DBG("printing content of file\n\t");
+  for (struct block *curr = to_read->block_list;
+       curr != NULL && curr->occupied != 0; curr = curr->next) {
+    for (int i = 0; i < curr->occupied; i++) {
+      DBG("%c", curr->memory[i]);
+    }
+  }
+  DBG("content of file printed\n");
+}
 void create_and_add_to_filelist_new_file(const char *filename) {
 
   DBG("should create new file");
@@ -231,6 +243,8 @@ int ufs_open(const char *filename, int flags) {
   if (file_descriptors == NULL) {
     DBG("fd_arr is null;allocating");
     alloc_file_descr_array(BLOCK_SIZE);
+    DBG("there should not be existing fd structs");
+    find_free_fd();
   }
   DBG("start ufs_open ");
   if ((flags & UFS_CREATE) != 0) {
@@ -252,10 +266,8 @@ int ufs_open(const char *filename, int flags) {
 
   struct filedesc *fd = malloc(sizeof(struct filedesc));
   fd->file = curr_file;
-  fd->read_offset = malloc(sizeof(int));
-  fd->write_offset = malloc(sizeof(int));
-  *fd->read_offset = 0;
-  *fd->write_offset = 0;
+  fd->offset = malloc(sizeof(int));
+  *fd->offset = 0;
   curr_file->refs++;
 
   int new_fd = find_free_fd();
@@ -301,25 +313,38 @@ ssize_t write_to_file(struct file *to_write, int *ptr_offset, const char *buf,
   DBG("start writing info in file");
   size_t remain = size;
   // add ptr offset use
-  struct block *curr_block = to_write->block_list;
+  struct block *curr_block =
+      get_needed_block(to_write->block_list, *ptr_offset);
+  // получили блок на котором остановились
+  int block_offset = *ptr_offset % BLOCK_SIZE;
+  // заняли место с которого надо писать
   int total_written = 0;
   while (remain != 0) {
-    size_t available_in_block = BLOCK_SIZE - curr_block->occupied;
-    size_t howmuch_write =
+    size_t available_in_block = BLOCK_SIZE - block_offset;
+    int howmuch_write =
         (remain < available_in_block) ? remain : available_in_block;
-    memcpy(curr_block->memory + curr_block->occupied, buf, howmuch_write);
+    memcpy(curr_block->memory + block_offset, buf + total_written,
+           howmuch_write);
+    // записали в блок до места оффсет+хавмачврайт
     remain -= howmuch_write;
     total_written += howmuch_write;
-    curr_block->occupied += howmuch_write;
+    // curr_block->occupied += howmuch_write;
+    if (curr_block->occupied < block_offset + howmuch_write) {
+      curr_block->occupied = block_offset + howmuch_write;
+    }
     DBG("block occupied at %d bytes", curr_block->occupied);
     if (curr_block->occupied == BLOCK_SIZE) {
       curr_block = get_of_allocate_new_block(curr_block);
+      block_offset = 0;
       DBG("getting new block");
+    } else {
+      block_offset += howmuch_write;
     }
   }
 
   DBG("try to dereference ptr_offset");
   *ptr_offset += total_written;
+  DBG_read_file_content(to_write);
   DBG("finished writing in file");
   return total_written;
 }
@@ -333,27 +358,17 @@ ssize_t ufs_write(int fd, const char *buf, size_t size) {
     return -1;
   }
   struct file *to_write = file_descriptors[fd]->file;
-  return write_to_file(to_write, file_descriptors[fd]->write_offset, buf, size);
+  return write_to_file(to_write, file_descriptors[fd]->offset, buf, size);
   (void)fd;
   (void)buf;
   (void)size;
   ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
   return -1;
 }
-void DBG_read_file_content(struct file *to_read) {
-  DBG("printing content of file\n\t");
-  for (struct block *curr = to_read->block_list;
-       curr != NULL && curr->occupied != 0; curr = curr->next) {
-    for (int i = 0; i < curr->occupied; i++) {
-      DBG("%c", curr->memory[i]);
-    }
-  }
-  DBG("content of file printed\n");
-}
 ssize_t read_file(struct file *to_read, int *ptr_offset, char *buf,
                   size_t size) {
   DBG("start read file");
-  DBG_read_file_content(to_read);
+  // DBG_read_file_content(to_read);
   size_t remain = size;
   struct block *curr_block = get_needed_block(to_read->block_list, *ptr_offset);
   DBG("\t in this block occupied %d bytes", curr_block->occupied);
@@ -379,7 +394,7 @@ ssize_t read_file(struct file *to_read, int *ptr_offset, char *buf,
     total_readed += to_read;
     remain -= to_read;
   }
-  DBG("finished read file");
+  DBG("finished read file code %d", total_readed);
   *ptr_offset += total_readed;
   return total_readed;
 }
@@ -394,7 +409,7 @@ ssize_t ufs_read(int fd, char *buf, size_t size) {
     return -1;
   }
   struct file *to_read = file_descriptors[fd]->file;
-  return read_file(to_read, file_descriptors[fd]->read_offset, buf, size);
+  return read_file(to_read, file_descriptors[fd]->offset, buf, size);
 
   /* IMPLEMENT THIS FUNCTION */
   (void)fd;
@@ -418,13 +433,12 @@ int ufs_close(int fd) {
   struct filedesc *fd_struct = file_descriptors[fd];
   struct file *file = fd_struct->file;
   DBG("file have %d refs", file->refs);
+  free(fd_struct->offset);
+  // no more fd should destroy fd and fd_arr[fd] = NULL;
+  free(fd_struct);
+  file_descriptors[fd] = NULL;
+  file_descriptor_count--;
   if (--(file->refs) == 0) {
-    free(fd_struct->read_offset);
-    free(fd_struct->write_offset);
-    // no more fd should destroy fd and fd_arr[fd] = NULL;
-    free(fd_struct);
-    file_descriptors[fd] = NULL;
-    file_descriptor_count--;
     DBG("\t free fd_struct with fd:%d", fd);
 
     if (file->delete) {
@@ -468,14 +482,15 @@ int ufs_delete(const char *filename) {
   struct file *next_file = to_delete->next;
   if (prev_file != NULL) {
     prev_file->next = next_file;
-    if (to_delete == file_list) {
-      DBG("wtf we have prev but that file is head of file_list????");
-    }
+    DBG("wtf we have prev but that file is head of file_list????");
+    assert(to_delete == file_list);
   }
   // WARN maybe this file head of file list
   if (next_file != NULL) {
     next_file->prev = prev_file;
   }
+  assert(file_list == to_delete);
+  return 0;
   /* IMPLEMENT THIS FUNCTION */
   (void)filename;
   ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
